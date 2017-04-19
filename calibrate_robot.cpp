@@ -234,43 +234,72 @@ void survive_sim_integrate(SurviveObjectSimulation *o) {
   // Update predicted global position based on velocity
   vec3 nextP=o->position; // +dt*o->velocity;    //  (velocity is worse than useless)
   
-  // Update predicted global position based on sensed angles
-  vec3 tracking=vec3(0.0);
-  printf("Total sensor error (m): ");
-  for (int S=0;S<SENSORS_PER_OBJECT;S++)
-  {
+  // Iteratively update position and orientation based on sensed angles
+  enum {NPASS=10};
+  for (int pass=0;pass<NPASS;pass++) {
+    vec3 sum_motion=vec3(0.0); // linear residual
+    float n_motion=0.0;
+    
+    vec3 sum_torque=vec3(0.0); // rotational residual
+    float n_torque=0.0;
+    
     float tot_err=0.0;
-    for (int L=0;L<NUM_LIGHTHOUSES;L++)
-      for (int A=0;A<2;A++)
-      {
-        FLT a=o->sensor[S].angle[L][A];
-        if (a==0.0) continue;  // no data
-        if (a<-1.5 || a>1.5) throw "Invalid angle";
-        
-        // Origin of sweep plane is at point where sweep axes cross:
-        vec3 P=o->lighthouse_position[L];
-        // Normal of sweep plane
-        vec3 N=survive_lighthouse_normal(o,L,A,a);
-         
-        // Expected location is at our origin plus the sensor position offset
-        vec3 E=nextP+survive_orient_global_from_local(&o->orient,o->hardware[S].position);
-        
-        // Detected location is the projection D of E onto the (P,N) plane:
-        //  We want dot(D-P,N)=0
-        FLT err=dot(E-P,N);  tot_err+=fabs(err);
-        vec3 correction=-err*N;
-        vec3 D=E+correction; // actual location on sweep plane
-        
-        FLT speed=0.5; // m/s of position correction per sensor
-        tracking+=speed*dt*correction; // move toward detected value
-        
-        // FLT sanity_check=dot(D-P,N); printf("Sanity check: D is off by %.5f meters\n",sanity_check);
-      }
-    if (tot_err>0) printf(" s%d: %.4f\n",S,tot_err);
+    if (pass==NPASS-1) printf("Per-sensor error (m): ");
+    for (int S=0;S<SENSORS_PER_OBJECT;S++)
+    {
+      float sensor_err=0.0;
+      for (int L=0;L<NUM_LIGHTHOUSES;L++)
+        for (int A=0;A<2;A++)
+        {
+          FLT a=o->sensor[S].angle[L][A];
+          if (a==0.0) continue;  // no data
+          if (a<-1.5 || a>1.5) throw "Invalid angle";
+          
+          // Origin of sweep plane is at point where sweep axes cross:
+          vec3 LP=o->lighthouse_position[L];
+          // Normal of sweep plane
+          vec3 LN=survive_lighthouse_normal(o,L,A,a);
+           
+          // Expected global sensed location is at our origin plus the sensor position offset
+          vec3 sensor_offset=survive_orient_global_from_local(&o->orient,o->hardware[S].position);
+          vec3 E=nextP+sensor_offset;
+          
+          // Detected location is the projection D of E onto the (P,N) plane:
+          //  We want dot(D-LP,LN)=0
+          FLT err=dot(E-LP,LN);  tot_err+=fabs(err); sensor_err+=fabs(err);
+          vec3 correction=-err*LN;
+          vec3 D=E+correction; // actual location on sweep plane
+          
+          sum_motion+=correction;
+          n_motion+=1.0;
+          
+          vec3 torque=cross(correction,normalize(sensor_offset));
+          sum_torque+=torque;
+          n_torque+=1.0;
+          
+          // FLT speed=0.5; // m/s of position correction per sensor
+          // tracking+=speed*dt*correction; // move toward detected value
+          
+          // FLT sanity_check=dot(D-LP,LN); printf("Sanity check: D is off by %.5f meters\n",sanity_check);
+        }
+      if (pass==NPASS-1) if (sensor_err>0) printf("%.4f\t",S,sensor_err);
+    }
+    if (pass==NPASS-1) printf("\n");
+    vec3 motion=sum_motion*(1.0/n_motion);
+    vec3 torque=sum_torque*(1.0/n_torque);
+    
+    printf("Pass %d: %d points, error %.4f meters\n",pass,(int)n_motion,tot_err/n_motion);
+    survive_vec3_print("    motion: ",motion);
+    survive_vec3_print("                     torque: ",torque);
+    
+    // Apply position offset:
+    nextP+=0.5*motion;
+    
+    // Once position is correct, apply torque to residual:
+    if (pass>5) 
+      survive_orient_rotate(&o->orient,
+        (dt*5.0)*torque);
   }
-  printf("\n");
-  survive_vec3_print("Tracked shift: ",tracking);
-  nextP+=tracking;
   
   // Update position and estimate velocity
   vec3 nextV=(nextP-o->position)/dt;
@@ -278,6 +307,7 @@ void survive_sim_integrate(SurviveObjectSimulation *o) {
   o->velocity=velfilter*nextV+(1.0-velfilter)*o->velocity;
   o->position=nextP;
   
+  // Coarse orientation updater:
   // If the lighthouse is visible from this sensor,
   //   then the sensor normal must point generally toward the lighthouse
   for (int L=0;L<NUM_LIGHTHOUSES;L++) {
@@ -298,7 +328,7 @@ void survive_sim_integrate(SurviveObjectSimulation *o) {
       //   and it's wrong if our position is wrong.
       survive_orient_nudge(&o->orient,
         to_LH,o->lighthouse_position[L]-o->position, 
-        dt*0.3);
+        dt*0.2);
     }
   }
   
@@ -501,7 +531,8 @@ usleep(20*1000); // limit to 50fps
 		CNFGGetDimensions( &screenx, &screeny );
 
 		
-		printf("\033[0;0f"); // seek to start of screen
+		//printf("\033[0;0f"); // seek to start of screen
+		printf("\033[2J"); // seek to (0,0) and clear screen
 		
 	  if (ww0) {
 	    survive_sim_integrate(ww0);
