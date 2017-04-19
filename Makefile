@@ -1,9 +1,13 @@
-all : lib data_recorder test calibrate calibrate_client
+all : lib data_recorder test calibrate calibrate_client calibrate_robot
 
+OPTS=-g -O3 -flto 
 CC:=gcc
 
 
-CFLAGS:=-Iinclude/libsurvive -I. -fPIC -g -O3 -Iredist -flto -DUSE_DOUBLE -std=gnu99 -rdynamic
+INCLUDES:=-Iinclude/libsurvive -I. -Iredist 
+DEFINES:=-DUSE_DOUBLE
+
+CFLAGS:=$(INCLUDES) $(OPTS) -fPIC -std=gnu99 -rdynamic $(DEFINES) 
 LDFLAGS:=-L/usr/local/lib -lpthread -lusb-1.0 -lz -lm -flto -g
 
 #----------
@@ -61,6 +65,9 @@ calibrate :  calibrate.c ./lib/libsurvive.so redist/os_generic.c $(GRAPHICS_LOFI
 
 calibrate_client :  calibrate_client.c ./lib/libsurvive.so redist/os_generic.c $(GRAPHICS_LOFI)
 	$(CC) -o $@ $^ $(LDFLAGS) $(CFLAGS)
+
+calibrate_robot :  calibrate_robot.cpp ./lib/libsurvive.so redist/os_generic.c $(GRAPHICS_LOFI)
+	g++ -std=c++14 -Iinclude $(INCLUDES) -o $@ $^ $(LDFLAGS) $(DEFINES) $(OPTS)
 
 ## Still not working!!! Don't use.
 static_calibrate : calibrate.c redist/os_generic.c $(DRAWFUNCTIONS) $(LIBSURVIVE_C)
