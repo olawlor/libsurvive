@@ -44,6 +44,14 @@ double time_in_seconds(void) {
 #include "osl/vec4.h"
 
 
+
+void survive_vec3_print(const char *heading, vec3 v)
+{
+  printf("%s: ( %.5f %.5f %.5f )\n", heading, v[0], v[1], v[2]);
+}
+
+
+
 /* A coordinate frame made from three unit vectors */
 typedef struct SurviveObjectOrientation {
   // Orientation matrix (orthogonal unit vectors)
@@ -56,6 +64,12 @@ void survive_orient_init(SurviveObjectOrientation *o) {
   o->x=vec3(1,0,0);
   o->y=vec3(0,1,0);
   o->z=vec3(0,0,1);
+}
+
+void survive_orient_print(SurviveObjectOrientation *o) {
+  survive_vec3_print("   X",o->x);
+  survive_vec3_print("   Y",o->y);
+  survive_vec3_print("   Z",o->z);
 }
 
 // Convert local coordinates out into global coordinates
@@ -133,7 +147,6 @@ typedef struct SurviveObjectSimulation {
   
   // Orientation of the lighthouses in global coordinates
   //    FIXME: for multi-object tracking, this needs to be a shared pointer.
-  //   lighthouse 0 always has identity orientation.
   SurviveObjectOrientation lighthouse_orient[NUM_LIGHTHOUSES];
   
   // Position of our center in global coordinates (meters)
@@ -156,8 +169,9 @@ typedef struct SurviveObjectSimulation {
   // Static info about the sensor hardware  
   const SurviveSensorHardware *hardware;
   
-  // Dynamic info about the sensor tracking
+  // Dynamic tracking info for each sensor
   SurviveSensorTracker sensor[SENSORS_PER_OBJECT];
+  
 } SurviveObjectSimulation;
 
 
@@ -173,9 +187,12 @@ SurviveObjectSimulation *survive_sim_init(const char *type) {
   survive_orient_init(&o->lighthouse_orient[0]);
   survive_orient_init(&o->lighthouse_orient[1]);
   
-  o->position=vec3(0,1.0,0);
+  o->position=vec3(1.0,1.0,0);
   o->velocity=vec3(0,0,0);
   survive_orient_init(&o->orient);
+  // flip initial estimate upside down, since controller Z+ is world Z-
+  o->orient.z*=-1.0; o->orient.y*=-1.0;
+  
   o->last_imu_time=now;
   o->down=vec3(0,0,0);
   
@@ -193,34 +210,101 @@ SurviveObjectSimulation *survive_sim_init(const char *type) {
   return o;
 }
 
+// Return the global coordinates normal of the plane swept by
+//   lighthouse L's axis A at angle ang radians.
+vec3 survive_lighthouse_normal(SurviveObjectSimulation *o,int L,int A,FLT ang)
+{
+  vec3 N;
+  FLT s=sin(ang), c=cos(ang);
+  if (A==0) { // Sweeping across X axis
+    N=vec3(-c,-s,0.0);
+  } else { // Y axis sweep
+    N=vec3(0.0,-s,c);
+  }
+  return survive_orient_global_from_local(&o->lighthouse_orient[L],N);
+}
+
 // Integrate the collected sensor sweep data
 void survive_sim_integrate(SurviveObjectSimulation *o) {
   double now=time_in_seconds();
   double dt=now-o->last_integrate_time;
   o->last_integrate_time=now;
   
-  // Update predicted position based on velocity
-  vec3 nextP=o->position+dt*o->velocity;
   
-  // Update predicted position based on sensor readings
+  // Update predicted global position based on velocity
+  vec3 nextP=o->position; // +dt*o->velocity;    //  (velocity is worse than useless)
   
+  // Update predicted global position based on sensed angles
+  for (int S=0;S<SENSORS_PER_OBJECT;S++)
+    for (int L=0;L<NUM_LIGHTHOUSES;L++)
+      for (int A=0;A<2;A++)
+      {
+        FLT a=o->sensor[S].angle[L][A];
+        if (a==0.0) continue;  // no data
+        
+        // Origin of sweep plane is at point where sweep axes cross:
+        vec3 P=o->lighthouse_position[L];
+        // Normal of sweep plane
+        vec3 N=survive_lighthouse_normal(o,L,A,a);
+         
+        // Expected location is at our origin plus the sensor position offset
+        vec3 E=nextP+survive_orient_global_from_local(&o->orient,o->hardware[S].position);
+        
+        // Detected location is the projection D of E onto the (P,N) plane:
+        //  We want dot(D-P,N)=0
+        FLT err=dot(E-P,N);
+        vec3 correction=-err*N;
+        vec3 D=E+correction; // actual location on sweep plane
+        
+        FLT speed=0.05; // m/s of position correction per sensor
+        nextP+=speed*dt*correction; // move toward detected value
+        
+        // FLT sanity_check=dot(D-P,N); printf("Sanity check: D is off by %.5f meters\n",sanity_check);
+      }
   
+  // Update position and estimate velocity
+  vec3 nextV=(nextP-o->position)/dt;
+  FLT velfilter=10.0*dt;
+  o->velocity=velfilter*nextV+(1.0-velfilter)*o->velocity;
+  o->position=nextP;
   
+  // If the lighthouse is visible from this sensor,
+  //   then the sensor normal must point generally toward the lighthouse
+  for (int L=0;L<NUM_LIGHTHOUSES;L++) {
+    vec3 to_LH=vec3(0.0); // points toward lighthouse (local coords)
+    for (int S=0;S<SENSORS_PER_OBJECT;S++)
+      for (int A=0;A<2;A++)
+        if (o->sensor[S].angle[L][A]!=0.0) 
+        { // this sensor sees the lighthouse
+          FLT weight=1.0;
+          to_LH+=weight*o->hardware[S].normal;
+        }
+    if (length(to_LH)!=0.0) {
+      to_LH=normalize(to_LH);
+      survive_vec3_print("  local to LH: ",to_LH);
+      
+      // Update orientation to reflect visibility.
+      //   Be gentle, because this is low precision,
+      //   and it's wrong if our position is wrong.
+      survive_orient_nudge(&o->orient,
+        to_LH,o->lighthouse_position[L]-o->position, 
+        dt*0.3);
+    }
+  }
+  
+  // Zero out the sensed angles:
+  for (int S=0;S<SENSORS_PER_OBJECT;S++)
+    for (int L=0;L<NUM_LIGHTHOUSES;L++)
+      for (int A=0;A<2;A++)
+        o->sensor[S].angle[L][A]=0.0;
 }
-
-void survive_vec3_print(const char *heading, const vec3 *v)
-{
-  printf("%s: ( %.5f %.5f %.5f )\n", heading, v->x, v->y, v->z);
-}
-
 // Dump important stuff to the screen:
 void survive_sim_print(SurviveObjectSimulation *o)
 {
-  survive_vec3_print("position",&(o->position));
-  survive_vec3_print("orient.x",&(o->orient.x));
-  survive_vec3_print("orient.y",&(o->orient.y));
-  survive_vec3_print("orient.z",&(o->orient.z));
-  survive_vec3_print("down",&(o->down));
+  survive_vec3_print("position",o->position);
+  survive_vec3_print("velocity",o->velocity);
+  survive_orient_print(&o->orient);
+  survive_vec3_print("down",o->down);
 }
 
 // Update simulation for these IMU readings
@@ -238,9 +322,9 @@ void survive_sim_imu(SurviveObjectSimulation *o, FLT * accelgyro)
   gyro*=dt; // radians of rotation this frame
   survive_orient_rotate(&o->orient,gyro);
   
-  // Keep the down vector pointing down
+  // Keep gravity's down vector pointing to global down
   survive_orient_nudge(&o->orient,
-    o->down,vec3(0,0,-1.0), dt*1.0);
+    o->down,vec3(0,0,-1.0), dt*2.0);
 }
 
 
@@ -297,6 +381,7 @@ void my_light_process( struct SurviveObject * so, int sensor_id, int acode, int 
 	survive_default_light_process( so, sensor_id, acode, timeinsweep, timecode, length, lh);
 	if( sensor_id < 0 ) return;
 	if( acode < 0 ) return;
+	
 //return;
 	int jumpoffset = sensor_id;
 	//if( strcmp( so->codename, "WM0" ) == 0 || strcmp( so->codename, "WW0" ) == 0) jumpoffset += 32;
@@ -368,6 +453,9 @@ void my_angle_process( struct SurviveObject * so, int sensor_id, int acode, uint
 {
 	survive_default_angle_process( so, sensor_id, acode, timecode, length, angle, lh );
 	
+	if (angle==0) angle=0.00000001; //  <- 0 is sentinal value
+	if (ww0) ww0->sensor[sensor_id].angle[lh][acode%2]=angle;
+	
 	/*
 	printf("Angle:  %d  %d  %d  %.5f  %08X %.3g\n",
 	  sensor_id, acode, lh, angle, timecode, length);
@@ -398,9 +486,9 @@ usleep(20*1000); // limit to 50fps
 		printf("\033[0;0f"); // seek to start of screen
 		
 	  if (ww0) {
+	    survive_sim_integrate(ww0);
 	    survive_sim_print(ww0);
 		}
-		
 		
 		printf( "RAWIMU ( %7.1f %7.1f %7.1f ) ( %5.1f %5.1f %5.1f ) %d\n", accelgyro[0], accelgyro[2], accelgyro[1], -accelgyro[3], -accelgyro[5], -accelgyro[4], imu_updates);
 		imu_updates=0;
