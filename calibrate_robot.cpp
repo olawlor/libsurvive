@@ -235,12 +235,17 @@ void survive_sim_integrate(SurviveObjectSimulation *o) {
   vec3 nextP=o->position; // +dt*o->velocity;    //  (velocity is worse than useless)
   
   // Update predicted global position based on sensed angles
+  vec3 tracking=vec3(0.0);
+  printf("Total sensor error (m): ");
   for (int S=0;S<SENSORS_PER_OBJECT;S++)
+  {
+    float tot_err=0.0;
     for (int L=0;L<NUM_LIGHTHOUSES;L++)
       for (int A=0;A<2;A++)
       {
         FLT a=o->sensor[S].angle[L][A];
         if (a==0.0) continue;  // no data
+        if (a<-1.5 || a>1.5) throw "Invalid angle";
         
         // Origin of sweep plane is at point where sweep axes cross:
         vec3 P=o->lighthouse_position[L];
@@ -252,15 +257,20 @@ void survive_sim_integrate(SurviveObjectSimulation *o) {
         
         // Detected location is the projection D of E onto the (P,N) plane:
         //  We want dot(D-P,N)=0
-        FLT err=dot(E-P,N);
+        FLT err=dot(E-P,N);  tot_err+=fabs(err);
         vec3 correction=-err*N;
         vec3 D=E+correction; // actual location on sweep plane
         
-        FLT speed=0.05; // m/s of position correction per sensor
-        nextP+=speed*dt*correction; // move toward detected value
+        FLT speed=0.5; // m/s of position correction per sensor
+        tracking+=speed*dt*correction; // move toward detected value
         
         // FLT sanity_check=dot(D-P,N); printf("Sanity check: D is off by %.5f meters\n",sanity_check);
       }
+    if (tot_err>0) printf(" s%d: %.4f\n",S,tot_err);
+  }
+  printf("\n");
+  survive_vec3_print("Tracked shift: ",tracking);
+  nextP+=tracking;
   
   // Update position and estimate velocity
   vec3 nextV=(nextP-o->position)/dt;
@@ -453,13 +463,17 @@ void my_angle_process( struct SurviveObject * so, int sensor_id, int acode, uint
 {
 	survive_default_angle_process( so, sensor_id, acode, timecode, length, angle, lh );
 	
-	if (angle==0) angle=0.00000001; //  <- 0 is sentinal value
-	if (ww0) ww0->sensor[sensor_id].angle[lh][acode%2]=angle;
+  if (angle<-1.5 || angle>1.5) {} // time delays cause really weird angles
+  else {
+	  if (angle==0) angle=0.00000001; //  <- 0 is sentinal value
+	  if (ww0) ww0->sensor[sensor_id].angle[lh][acode%2]=angle;
+  }	
 	
 	/*
 	printf("Angle:  %d  %d  %d  %.5f  %08X %.3g\n",
 	  sensor_id, acode, lh, angle, timecode, length);
 	*/
+	
 	acode=(acode%2)+2*lh;
 	all_angles[sensor_id][acode]=angle;
 }
@@ -482,17 +496,39 @@ void * GuiThread( void * v )
 usleep(20*1000); // limit to 50fps
 #endif
 		CNFGHandleInput();
+		CNFGClearFrame();
+		CNFGColor( 0xFFFFFF );
+		CNFGGetDimensions( &screenx, &screeny );
+
 		
 		printf("\033[0;0f"); // seek to start of screen
 		
 	  if (ww0) {
 	    survive_sim_integrate(ww0);
 	    survive_sim_print(ww0);
+
+		  float scaleX=-screenx/3.0, scaleY=screeny/2.0;
+		  float offX=screenx, offY=0;
+		
+		  // Segments for tracked controller position
+		  for (int axis=0;axis<3;axis++) {
+		    CNFGColor(0x0000ff<<(8*axis));
+		    vec3 del=0.1*ww0->orient.x;
+		    if (axis==1) del=0.1*ww0->orient.y;
+		    if (axis==2) del=0.2*ww0->orient.z;
+		    vec3 S=ww0->position, E=ww0->position + del;
+		    
+		    CNFGTackSegment( S.x*scaleX+offX, S.y*scaleY+offY,
+		                     E.x*scaleX+offX, E.y*scaleY+offY);
+		  }
+		  
+		
 		}
 		
 		printf( "RAWIMU ( %7.1f %7.1f %7.1f ) ( %5.1f %5.1f %5.1f ) %d\n", accelgyro[0], accelgyro[2], accelgyro[1], -accelgyro[3], -accelgyro[5], -accelgyro[4], imu_updates);
 		imu_updates=0;
 		
+		if (0) // dump sensor data as simple table:
 	  for (sensor_id=0;sensor_id<32;sensor_id++)
 	  {
 	    printf("Sensor %2d: ",sensor_id);
@@ -508,9 +544,8 @@ usleep(20*1000); // limit to 50fps
 	  }
 		
 		
-		CNFGClearFrame();
-		CNFGColor( 0xFFFFFF );
-		CNFGGetDimensions( &screenx, &screeny );
+		
+		
 
 		int i,nn;
 		for( i = 0; i < 32*3; i++ )
