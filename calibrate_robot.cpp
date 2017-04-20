@@ -308,11 +308,14 @@ void survive_sim_integrate(SurviveObjectSimulation *o) {
     
     if (pass>0 && n_motion>0) {
       // Apply position offset:
-      nextP+=motion;
+      float strength=0.03*n_motion;
+      const float max_strength=0.5;
+      if (strength>max_strength) strength=max_strength;
+      nextP+=strength*motion;
     }
     
     // Wait until position is correct to apply torque:
-    if (pass>3 && n_torque>4) 
+    if (false && pass>3 && n_torque>4) 
     { // Apply torque
       vec3 local_torque=survive_orient_local_from_global(&o->orient,torque);
       
@@ -342,7 +345,7 @@ void survive_sim_integrate(SurviveObjectSimulation *o) {
           to_LH+=weight*o->hardware[S].normal;
           n_LH+=weight;
         }
-    if (false && length(to_LH)!=0.0 && n_LH>1) {
+    if (length(to_LH)!=0.0 && n_LH>1) {
       to_LH=normalize(to_LH);
       // survive_vec3_print("  local to LH: ",to_LH);
       
