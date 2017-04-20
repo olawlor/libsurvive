@@ -244,6 +244,8 @@ void survive_sim_integrate(SurviveObjectSimulation *o) {
     vec3 sum_torque=vec3(0.0); // rotational residual, global coordinates
     float n_torque=0.0;
     
+    int n_lighthouse[NUM_LIGHTHOUSES]={0}; // sensor count visible from this lighthouse
+    
     float tot_err=0.0; int n_err=0; int n_outlier=0;
     if (pass==NPASS-1) printf("Per-sensor error (m): ");
     for (int S=0;S<SENSORS_PER_OBJECT;S++)
@@ -273,6 +275,8 @@ void survive_sim_integrate(SurviveObjectSimulation *o) {
           tot_err+=ferr; n_err++; sensor_err+=ferr; n_sensor++;
           if (ferr<3.0*last_avg_err) 
           { // Include this point in the average:
+            n_lighthouse[L]++;
+            
             vec3 correction=-err*LN;
             vec3 D=E+correction; // actual location on sweep plane
             
@@ -302,15 +306,23 @@ void survive_sim_integrate(SurviveObjectSimulation *o) {
     
     float avg_err=tot_err/n_err;
     
-    printf("Pass %d: %d points, error %.4f meters, %d outliers removed\n",pass,(int)n_motion,avg_err,n_outlier);
+    printf("Pass %d: %d points, error %.4f meters, %d/%d visible, %d outliers removed\n",
+        pass,(int)n_motion,avg_err,n_lighthouse[0],n_lighthouse[1],n_outlier);
     survive_vec3_print("    motion: ",motion);
     survive_vec3_print("                     torque: ",torque);
     
-    if (pass>0 && n_motion>0) {
+    if (pass>0 && n_motion>0 && n_lighthouse[0]>2 && n_lighthouse[1]>2) {
       // Apply position offset:
       float strength=0.03*n_motion;
       const float max_strength=0.5;
       if (strength>max_strength) strength=max_strength;
+
+      // If the error is big, chop down the strength:
+      float extra_err=avg_err-0.03;
+      if (extra_err>0.0) {
+        strength*=1/(50.0*extra_err+1.0);
+      }
+      
       nextP+=strength*motion;
     }
     
@@ -354,7 +366,7 @@ void survive_sim_integrate(SurviveObjectSimulation *o) {
       //   and it's wrong if our position is wrong.
       survive_orient_nudge(&o->orient,
         to_LH,o->lighthouse_position[L]-o->position, 
-        dt*0.1);
+        dt*0.2);
     }
   }
   
@@ -478,7 +490,7 @@ void my_light_process( struct SurviveObject * so, int sensor_id, int acode, int 
 	}
 	*/
 	acode=(acode%2)+2*lh;
-	bufferpts[jumpoffset][acode] = (timeinsweep-100000)/300;
+	bufferpts[jumpoffset][acode] = (timeinsweep-80000)/500;
 	buffertimeto[jumpoffset][acode]=0;
 }
 
@@ -542,7 +554,7 @@ void * GuiThread( void * v )
 	short screenx, screeny;
 	CNFGBGColor = 0x000000;
 	CNFGDialogColor = 0x444444;
-	CNFGSetup( "Survive Robot Controller Tracking", 800, 600 );
+	CNFGSetup( "Survive Robot Controller Tracking", 700, 700 );
 
 	while(1)
 	{
@@ -564,8 +576,8 @@ usleep(20*1000); // limit to 50fps
 	    survive_sim_integrate(ww0);
 	    survive_sim_print(ww0);
 
-		  float scaleX=-screenx/3.0, scaleY=screeny/2.0;
-		  float offX=screenx, offY=0;
+		  float scaleX=-screenx/5.0, scaleY=screeny/5.0;
+		  float offX=screenx+2.0*scaleX, offY=0;
 		
 		  // Segments for tracked controller position
 		  for (int axis=0;axis<3;axis++) {
@@ -651,7 +663,8 @@ usleep(20*1000); // limit to 50fps
 		CNFGPenX = 3;
 		CNFGPenY = 3;
 		CNFGDrawText( caldesc, 4 );
-
+		
+    fflush(stdout);
 
 		CNFGSwapBuffers();
 		OGUSleep( 10000 );
