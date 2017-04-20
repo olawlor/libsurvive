@@ -197,7 +197,7 @@ SurviveObjectSimulation *survive_sim_init(const char *type) {
   o->down=vec3(0,0,0);
   
   const static SurviveSensorHardware hardware[]={
-#include "survive_models/controller_points.h"
+#include "survive_models/controller_cal.h"
   };
   o->hardware=hardware;
   
@@ -236,18 +236,19 @@ void survive_sim_integrate(SurviveObjectSimulation *o) {
   
   // Iteratively update position and orientation based on sensed angles
   enum {NPASS=10};
+  float last_avg_err=10.0;
   for (int pass=0;pass<NPASS;pass++) {
-    vec3 sum_motion=vec3(0.0); // linear residual
+    vec3 sum_motion=vec3(0.0); // linear residual, global coordinates
     float n_motion=0.0;
     
-    vec3 sum_torque=vec3(0.0); // rotational residual
+    vec3 sum_torque=vec3(0.0); // rotational residual, global coordinates
     float n_torque=0.0;
     
-    float tot_err=0.0;
+    float tot_err=0.0; int n_err=0; int n_outlier=0;
     if (pass==NPASS-1) printf("Per-sensor error (m): ");
     for (int S=0;S<SENSORS_PER_OBJECT;S++)
     {
-      float sensor_err=0.0;
+      float sensor_err=0.0; int n_sensor=0;
       for (int L=0;L<NUM_LIGHTHOUSES;L++)
         for (int A=0;A<2;A++)
         {
@@ -266,39 +267,59 @@ void survive_sim_integrate(SurviveObjectSimulation *o) {
           
           // Detected location is the projection D of E onto the (P,N) plane:
           //  We want dot(D-LP,LN)=0
-          FLT err=dot(E-LP,LN);  tot_err+=fabs(err); sensor_err+=fabs(err);
-          vec3 correction=-err*LN;
-          vec3 D=E+correction; // actual location on sweep plane
+          FLT err=dot(E-LP,LN);  
           
-          sum_motion+=correction;
-          n_motion+=1.0;
-          
-          vec3 torque=cross(correction,normalize(sensor_offset));
-          sum_torque+=torque;
-          n_torque+=1.0;
-          
-          // FLT speed=0.5; // m/s of position correction per sensor
-          // tracking+=speed*dt*correction; // move toward detected value
-          
-          // FLT sanity_check=dot(D-LP,LN); printf("Sanity check: D is off by %.5f meters\n",sanity_check);
+          float ferr=fabs(err);
+          tot_err+=ferr; n_err++; sensor_err+=ferr; n_sensor++;
+          if (ferr<3.0*last_avg_err) 
+          { // Include this point in the average:
+            vec3 correction=-err*LN;
+            vec3 D=E+correction; // actual location on sweep plane
+            
+            sum_motion+=correction;
+            n_motion+=1.0;
+            
+            vec3 torque=cross(sensor_offset,correction);
+            // magnitude of cross product: |s||c|sin(angle)
+            //  Rotation required for correction: |c|/|s| radians
+            //  so divide by |s|^2
+            torque*=1.0/(0.01*0.01+dot(sensor_offset,sensor_offset));
+            sum_torque+=torque;
+            n_torque+=1.0;
+            
+            // FLT speed=0.5; // m/s of position correction per sensor
+            // tracking+=speed*dt*correction; // move toward detected value
+            
+            // FLT sanity_check=dot(D-LP,LN); printf("Sanity check: D is off by %.5f meters\n",sanity_check);
+          }
+          else n_outlier++;
         }
-      if (pass==NPASS-1) if (sensor_err>0) printf("%.4f\t",S,sensor_err);
+      if (pass==NPASS-1) if (sensor_err>0) printf("%.4f(%d)\t",sensor_err/n_sensor,n_sensor);
     }
     if (pass==NPASS-1) printf("\n");
     vec3 motion=sum_motion*(1.0/n_motion);
     vec3 torque=sum_torque*(1.0/n_torque);
     
-    printf("Pass %d: %d points, error %.4f meters\n",pass,(int)n_motion,tot_err/n_motion);
+    float avg_err=tot_err/n_err;
+    
+    printf("Pass %d: %d points, error %.4f meters, %d outliers removed\n",pass,(int)n_motion,avg_err,n_outlier);
     survive_vec3_print("    motion: ",motion);
     survive_vec3_print("                     torque: ",torque);
     
-    // Apply position offset:
-    nextP+=0.5*motion;
+    if (pass>0 && n_motion>0) {
+      // Apply position offset:
+      nextP+=motion;
+    }
     
-    // Once position is correct, apply torque to residual:
-    if (pass>5) 
+    // Wait until position is correct to apply torque:
+    if (pass>3 && n_torque>4) 
+    { // Apply torque
+      vec3 local_torque=survive_orient_local_from_global(&o->orient,torque);
+      
       survive_orient_rotate(&o->orient,
-        (dt*5.0)*torque);
+        (dt*10.0)*local_torque);
+    }
+    last_avg_err=avg_err;
   }
   
   // Update position and estimate velocity
@@ -312,23 +333,25 @@ void survive_sim_integrate(SurviveObjectSimulation *o) {
   //   then the sensor normal must point generally toward the lighthouse
   for (int L=0;L<NUM_LIGHTHOUSES;L++) {
     vec3 to_LH=vec3(0.0); // points toward lighthouse (local coords)
+    float n_LH=0;
     for (int S=0;S<SENSORS_PER_OBJECT;S++)
       for (int A=0;A<2;A++)
         if (o->sensor[S].angle[L][A]!=0.0) 
         { // this sensor sees the lighthouse
           FLT weight=1.0;
           to_LH+=weight*o->hardware[S].normal;
+          n_LH+=weight;
         }
-    if (length(to_LH)!=0.0) {
+    if (false && length(to_LH)!=0.0 && n_LH>1) {
       to_LH=normalize(to_LH);
-      survive_vec3_print("  local to LH: ",to_LH);
+      // survive_vec3_print("  local to LH: ",to_LH);
       
       // Update orientation to reflect visibility.
       //   Be gentle, because this is low precision,
       //   and it's wrong if our position is wrong.
       survive_orient_nudge(&o->orient,
         to_LH,o->lighthouse_position[L]-o->position, 
-        dt*0.2);
+        dt*0.1);
     }
   }
   
@@ -516,7 +539,7 @@ void * GuiThread( void * v )
 	short screenx, screeny;
 	CNFGBGColor = 0x000000;
 	CNFGDialogColor = 0x444444;
-	CNFGSetup( "Survive GUI Debug", 800, 600 );
+	CNFGSetup( "Survive Robot Controller Tracking", 800, 600 );
 
 	while(1)
 	{
@@ -544,9 +567,9 @@ usleep(20*1000); // limit to 50fps
 		  // Segments for tracked controller position
 		  for (int axis=0;axis<3;axis++) {
 		    CNFGColor(0x0000ff<<(8*axis));
-		    vec3 del=0.1*ww0->orient.x;
-		    if (axis==1) del=0.1*ww0->orient.y;
-		    if (axis==2) del=0.2*ww0->orient.z;
+		    vec3 del=0.2*ww0->orient.x;
+		    if (axis==1) del=0.2*ww0->orient.y;
+		    if (axis==2) del=0.4*ww0->orient.z;
 		    vec3 S=ww0->position, E=ww0->position + del;
 		    
 		    CNFGTackSegment( S.x*scaleX+offX, S.y*scaleY+offY,
