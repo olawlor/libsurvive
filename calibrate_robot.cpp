@@ -235,7 +235,7 @@ void survive_sim_integrate(SurviveObjectSimulation *o) {
   vec3 nextP=o->position; // +dt*o->velocity;    //  (velocity is worse than useless)
   
   // Iteratively update position and orientation based on sensed angles
-  enum {NPASS=10};
+  enum {NPASS=5};
   float last_avg_err=10.0;
   for (int pass=0;pass<NPASS;pass++) {
     vec3 sum_motion=vec3(0.0); // linear residual, global coordinates
